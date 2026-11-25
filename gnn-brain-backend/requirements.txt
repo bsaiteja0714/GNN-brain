@@ -2,3 +2,4 @@ fastapi
 uvicorn
 networkx
 pydantic
+numpy>=1.25

@@ -1,197 +1,92 @@
-<div align="center">
+# GNN Brain
 
-# 🧠 GNN Brain
+**Ask a school question and watch it travel through the network.** GNN Brain combines an interactive graph, source-backed node chat, and a small graph-convolution model that routes subject questions.
 
-### Interactive Graph Knowledge Chatbot
+The fictional school has **207 nodes**, **226 links**, and **34 searchable example questions**. Five classes of 35 students are connected through class representatives, subject in-charges, department heads, the Dean, and the Director.
 
-**Chat with any node in a 3D knowledge graph — students, teachers, projects, and more.**  
-Powered by GNN-inspired retrieval, semantic search, and a rule-based AI engine.
+## Quick start
 
-[![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=flat&logo=python&logoColor=white)](https://python.org)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.110+-009688?style=flat&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
-[![React](https://img.shields.io/badge/React-18+-61DAFB?style=flat&logo=react&logoColor=black)](https://react.dev)
-[![TypeScript](https://img.shields.io/badge/TypeScript-5+-3178C6?style=flat&logo=typescript&logoColor=white)](https://typescriptlang.org)
-[![Vite](https://img.shields.io/badge/Vite-7+-646CFF?style=flat&logo=vite&logoColor=white)](https://vite.dev)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+Requires Python 3.10+ and Node.js 20.19+ on the 20.x line, or 22.12+. Clone the public repository:
 
-</div>
-
----
-
-## 🌟 What Is This?
-
-**GNN Brain** is a full-stack AI chatbot that represents an institute's social and academic graph as an interactive 3D network. Click any node — a student, teacher, project, admin — and start a conversation. The AI answers intelligently using that node's graph context: connections, projects, concerns, interests, and more.
-
-It simulates **Graph Neural Network reasoning** using FAISS semantic search + NetworkX graph expansion, without requiring heavy GNN training.
-
----
-
-## ✨ Features
-
-| Feature | Description |
-|---|---|
-| 🌐 **3D Interactive Graph** | Real-time force-directed graph with Three.js & react-force-graph-3d |
-| 🤖 **AI Chatbot per Node** | Each node answers in-character based on its graph data |
-| 🔍 **GNN-Style Retrieval** | FAISS vector search + NetworkX neighbor expansion |
-| 💬 **Natural Language** | Ask in plain English — projects, concerns, connections, greetings |
-| 🩷 **Project Nodes** | Students and teachers linked to real project nodes |
-| ✨ **Source Highlighting** | Cited nodes glow gold in the 3D graph when the bot answers |
-| 👋 **In-Character Greetings** | Say "hi" and each node introduces itself with its own data |
-
----
-
-## 🗂️ Project Structure
-
-```
-GNN bot/
-├── gnn-brain-backend/          # Python FastAPI backend
-│   └── app/
-│       ├── main.py             # FastAPI app + /graph, /path endpoints
-│       ├── api/
-│       │   └── chat.py         # POST /chat endpoint
-│       ├── ai/
-│       │   ├── llm.py          # Rule-based answer generator
-│       │   ├── embedder.py     # Sentence transformer embeddings
-│       │   └── prompt_templates.py
-│       └── graph/
-│           ├── data.py         # Node + edge definitions
-│           ├── graph_builder.py
-│           ├── retriever.py    # FAISS + NetworkX retrieval
-│           └── brain.py        # ChatbotEngine orchestrator
-│
-└── gnn-brain-ui/               # React + Vite + TypeScript frontend
-    └── src/
-        ├── App.tsx             # 3D graph + side panel
-        ├── ChatPanel.tsx       # Chat UI component
-        └── App.css
+```sh
+git clone https://github.com/bsaiteja0714/GNN-brain.git
+cd GNN-brain
 ```
 
----
+Start the FastAPI backend on **port 8000**.
 
-## 🚀 Getting Started
+<details open>
+<summary>Windows PowerShell</summary>
 
-### Prerequisites
-
-- **Python** 3.10+
-- **Node.js** 18+
-
----
-
-### 1. Clone the repository
-
-```bash
-git clone https://github.com/<your-username>/gnn-brain.git
-cd "gnn-brain"
-```
-
----
-
-### 2. Backend Setup
-
-```bash
-cd gnn-brain-backend
-
-# Create virtual environment
+```powershell
 python -m venv .venv
-
-# Activate it
-.venv\Scripts\activate          # Windows
-source .venv/bin/activate       # macOS / Linux
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Start the server
-python -m uvicorn app.main:app --reload
+.\.venv\Scripts\python.exe -m pip install -r gnn-brain-backend\requirements.txt
+Set-Location gnn-brain-backend
+..\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-✅ Backend running at **http://localhost:8000**
+</details>
 
----
+<details>
+<summary>macOS or Linux</summary>
 
-### 3. Frontend Setup
+```sh
+python3 -m venv .venv
+.venv/bin/python -m pip install -r gnn-brain-backend/requirements.txt
+cd gnn-brain-backend
+../.venv/bin/python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+```
 
-```bash
+</details>
+
+In a second terminal, from the repository root, start the React frontend:
+
+```sh
 cd gnn-brain-ui
-npm install
-npm run dev
+npm ci
+npm run dev -- --host 127.0.0.1
 ```
 
-✅ Frontend running at **http://localhost:5173**
+Open [the app](http://127.0.0.1:5173/) or [the API docs](http://127.0.0.1:8000/docs). Node chat and the message-passing example work without a provider key.
 
----
+## Try the school graph
 
-## 🔌 API Reference
+Select a student and ask **“When is Founders Day?”** The question travels through the class representative, an in-charge, and a department head to the Dean. The reply appears in chat while the graph animates its return. Use **Replay path** to revisit the route.
 
-### `GET /graph`
-Returns all nodes and edges for the 3D graph visualization.
+| Try asking | Source |
+| --- | --- |
+| What are you working on? | Selected student or class representative |
+| Where is our morning assembly? | Class representative |
+| When is the maths assignment due? | Maths in-charge |
+| When is the coding workshop? | Computing HOD |
+| How do I borrow or renew a library book? | Dean |
+| What should I do if I lost my student ID? | Director |
 
-### `POST /chat`
-Chat with a node using graph context.
+Use **Question library** to browse more examples. Search for a node by name or role, drag nodes to explore connections, and use **Fit graph** to reset the view. The graph menu also includes a standalone mean-aggregation example.
 
-**Request:**
-```json
-{
-  "query": "What projects is this student working on?",
-  "node": "Ananya Sharma"
-}
+## How routing works
+
+Each node checks its own records before passing the question onward. At a class representative’s subject branch, the model aggregates neighboring HOD signals and ranks the available in-charges. General school questions start on the Science branch. If a relevant published record is reachable outside the upward chain, the app can consult its owner within the class or school-wide scope. Answers cite their demo record, and unrecognized questions return an unresolved result.
+
+The frontend uses React, TypeScript, Vite, and a D3 force layout rendered on Canvas. The backend uses FastAPI, NetworkX, and NumPy. The [school graph](gnn-brain-backend/app/graph/data.py), [knowledge records](gnn-brain-backend/app/graph/knowledge.py), and [routing model](gnn-brain-backend/app/graph/gnn_model.py) are separate so they can be inspected independently.
+
+## Optional graph assistant
+
+Open the plug icon and choose **OpenAI**, **Groq**, or **Google AI Studio (Gemini)**. Enter your API key and a model that supports JSON output. The assistant can explain the active graph, show a valid example path, or propose a graph edit for you to review and apply. Custom graphs are saved in the browser.
+
+Verification sends a short test message. Assistant requests send the active graph, the question, and recent chat to your selected provider through the local backend. For the demo school, this includes fictional public records and the selected student’s demo profile. Your key stays in the open tab’s memory. [Get a Gemini API key](https://aistudio.google.com/api-keys)
+
+## Checks
+
+```sh
+# From gnn-brain-backend, with the virtual environment active
+python -m unittest discover -s tests
+
+# From gnn-brain-ui
+npm run lint
+npm run build
 ```
 
-**Response:**
-```json
-{
-  "answer": "Ananya Sharma is currently working on the AI Chatbot project.",
-  "sources": ["project_ai_chatbot", "S-A-3"]
-}
-```
+## Demo data
 
----
-
-## 💬 Example Conversations
-
-| What you type | What the bot answers |
-|---|---|
-| `hi` | Node greets you in-character with its name, interest and project |
-| `What projects is this student working on?` | Names the student's linked project |
-| `What is this student worried about?` | Reads the student's concern from graph data |
-| `Who is mentoring this project?` | Finds the connected Teacher node |
-| `Tell me about yourself` | Full description from node metadata |
-| `How are you connected to others?` | Shows graph path context |
-
----
-
-## 🎨 Node Color Guide
-
-| Color | Role |
-|---|---|
-| 🟢 Green | Section A Students |
-| 🟠 Orange | Section B Students |
-| 🟣 Indigo | Section C Students |
-| 🟡 Yellow | HOD |
-| 🔴 Red | Dean |
-| 🔵 Sky Blue | Admin |
-| 🩷 Pink | Projects |
-| 🟪 Purple | Other |
-
----
-
-## 🛠️ Tech Stack
-
-| Layer | Technology |
-|---|---|
-| **Frontend** | React 18, TypeScript, Vite, react-force-graph-3d, Three.js |
-| **Backend** | FastAPI, Uvicorn, Python 3.10+ |
-| **AI / Retrieval** | Sentence Transformers (`all-MiniLM-L6-v2`), FAISS, NetworkX |
-| **Graph Engine** | Custom node/edge schema, GNN-style neighborhood expansion |
-
----
-
-## 📄 License
-
-[MIT](LICENSE) — free to use, fork, and build on.
-
----
-
-<div align="center">
-Made with ❤️ using FastAPI + React + NetworkX
-</div>
+School names, schedules, policies, and student profiles are fictional. Scenario ideas came from published guidance on library use, missed assessments, trips, and exams. [Bradford High School](https://www.kusd.edu/bradford/information/practices-procedures/) · [Pottsgrove School District](https://www.pgsd.org/resources/parent-resources/pgms-student-handbook) · [Rankin County School District](https://www.rcsd.ms/parents/student-handbook) · [CBSE](https://www.cbse.gov.in/cbsenew/Examination_Circular.html)

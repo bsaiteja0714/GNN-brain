@@ -1,46 +1,35 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+import networkx as nx
 
-from app.graph.data import RAW_NODES
+from app.api.assistant import router as assistant_router
 from app.api.chat import router as chat_router
+from app.graph.brain import bot_engine
 
-
-app = FastAPI()
-
-# Allow frontend (Vite) to talk to backend
+app = FastAPI(title="GNN Brain")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type", "X-Provider-Key"],
 )
-
 app.include_router(chat_router)
+app.include_router(assistant_router)
+
 
 @app.get("/")
 def root():
-    return {"message": "GNN Brain backend is alive 🧠"}
+    return {"message": "GNN Brain backend is alive"}
+
 
 @app.get("/graph")
 def get_graph():
-    nodes = []
-    links = []
-    for node in RAW_NODES:
-        nodes.append({
-            "id": node["node_id"],
-            "label": node.get("label", node["node_id"]),
-            "role": node.get("type", "Other"), 
-            "section": node.get("section"),
-            "importance": node.get("importance", 1),
-            "text": node.get("text", "")
-        })
-        for target in node.get("connections", []):
-            links.append({"source": node["node_id"], "target": target})
-            
-    return {"nodes": nodes, "links": links}
+    return bot_engine.graph_data()
+
 
 @app.get("/path/{node_id}")
 def get_path(node_id: str):
-    return {"path": []}
-
+    start = bot_engine.resolve(node_id)
+    if start is None:
+        raise HTTPException(404, detail="School node not found.")
+    return {"path": nx.shortest_path(bot_engine.G, start, "director")}

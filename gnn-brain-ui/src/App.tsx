@@ -1,361 +1,323 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
-import React, { useMemo, useState, useRef, useEffect } from "react";
-import * as THREE from "three";
-// @ts-ignore
-import ForceGraph3D from "react-force-graph-3d";
-import "./App.css";
-import ChatPanel from "./ChatPanel";
+import { useEffect, useMemo, useRef, useState } from 'react'
+import ChatPanel from './ChatPanel'
+import type { Mode, Thread, Turn } from './ChatPanel'
+import GraphCanvas from './GraphCanvas'
+import Icon from './Icon'
+import ProviderDialog from './ProviderDialog'
+import { post, providerNames } from './api'
+import type { Provider } from './api'
+import { messagePassingGraph, nodeColor, roleColor, roleLabel } from './school'
+import type { AssistantReply, GraphNode, GraphPhase, SchoolGraph, SchoolReply, Theme, Trace, Workspace } from './school'
+import './App.css'
 
-// ── Types ────────────────────────────────────────────────────────────────────
+type SavedWorkspace = { id: string; graph: Workspace }
+const STORAGE = 'gnn-brain.workspaces.v1'
+const ACTIVE = 'gnn-brain.active-workspace.v1'
+const THEME = 'gnn-brain.theme.v1'
+const ASSISTANT_PROMPTS = [
+  { label: 'Explain this graph', question: 'Explain what the nodes and links represent in this graph and how information moves through it. Show one example path.' },
+  { label: 'How does a GNN learn?', question: 'Use this graph to explain a GNN message-passing layer, neighborhood aggregation, and what weights are learned. Show an example path.' },
+  { label: 'Generate a new graph', question: 'Create a new teaching graph with 8–12 nodes for a research citation network. Use roles for papers, authors, and topics and give each node a short description. Explain how a GNN could use it.' },
+]
+const LEARNING_QUESTION = 'How does mean aggregation work here?'
 
-type NodeRole =
-  | "Student"
-  | "CR"
-  | "Teacher"
-  | "HOD"
-  | "Dean"
-  | "Admin"
-  | "project"
-  | "Other";
-
-type BrainNode = {
-  id: string;
-  label: string;
-  cluster: number;
-  text: string;
-  role: NodeRole;
-  section?: "A" | "B" | "C";
-  importance: number;
-};
-
-type BrainLink = { source: string; target: string };
-type BrainGraph = { nodes: BrainNode[]; links: BrainLink[] };
-
-// ── Constants ─────────────────────────────────────────────────────────────────
-
-const BACKEND_URL = "/api";
-
-const NODE_COLORS: Record<number, string> = {
-  0: "#22c55e", // Section A  — green
-  1: "#f97316", // Section B  — orange
-  2: "#6366f1", // Section C  — indigo
-  3: "#eab308", // HOD        — yellow
-  4: "#ef4444", // Dean       — red
-  5: "#0ea5e9", // Admin      — sky blue
-  6: "#ec4899", // Project    — pink
-  7: "#a855f7", // Other      — purple
-};
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-function clusterFor(role: string, section?: string): number {
-  if (section === "A") return 0;
-  if (section === "B") return 1;
-  if (section === "C") return 2;
-  if (role === "HOD") return 3;
-  if (role === "Dean") return 4;
-  if (role === "Admin") return 5;
-  if (role === "project") return 6;
-  return 7;
+function initialWorkspaces(): SavedWorkspace[] {
+  try {
+    const stored: unknown = JSON.parse(localStorage.getItem(STORAGE) || '[]')
+    if (!Array.isArray(stored)) return []
+    return stored.filter(item => typeof item?.id === 'string' && typeof item.graph?.title === 'string'
+      && Array.isArray(item.graph.nodes) && Array.isArray(item.graph.links))
+  } catch {
+    return []
+  }
 }
 
-function mapRole(raw: string): NodeRole {
-  const allowed: NodeRole[] = [
-    "Student", "CR", "Teacher", "HOD", "Dean", "Admin", "project",
-  ];
-  return allowed.includes(raw as NodeRole) ? (raw as NodeRole) : "Other";
+function initialWorkspace() {
+  try { return localStorage.getItem(ACTIVE) ?? 'school' } catch { return 'school' }
 }
 
-// ── App ───────────────────────────────────────────────────────────────────────
+function saveActive(id: string) {
+  try { localStorage.setItem(ACTIVE, id) } catch { /* The workspace still works in memory. */ }
+}
 
-const App: React.FC = () => {
-  const [graphData, setGraphData] = useState<BrainGraph>({ nodes: [], links: [] });
-  const [selectedNode, setSelectedNode] = useState<BrainNode | null>(null);
-  const [backendConnected, setBackendConnected] = useState(false);
-  const [graphLoading, setGraphLoading] = useState(true);
-  const [highlightedNodeIds, setHighlightedNodeIds] = useState<Set<string>>(new Set());
-  const [highlightedLinkKeys, setHighlightedLinkKeys] = useState<Set<string>>(new Set());
+function App() {
+  const [theme, setTheme] = useState<Theme>(() => {
+    try { return localStorage.getItem(THEME) === 'light' ? 'light' : 'dark' } catch { return 'dark' }
+  })
+  const [school, setSchool] = useState<SchoolGraph>()
+  const [saved, setSaved] = useState(initialWorkspaces)
+  const [workspaceId, setWorkspaceId] = useState(initialWorkspace)
+  const [selectedIds, setSelectedIds] = useState<Record<string, string>>({})
+  const [threads, setThreads] = useState<Record<string, Thread>>({})
+  const [mode, setMode] = useState<Mode>('local')
+  const [chatOpen, setChatOpen] = useState(true)
+  const [provider, setProvider] = useState<Provider | null>(null)
+  const [providerOpen, setProviderOpen] = useState(false)
+  const [loadError, setLoadError] = useState(false)
+  const [attempt, setAttempt] = useState(0)
+  const [storageNote, setStorageNote] = useState('')
+  const [search, setSearch] = useState('')
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [phase, setPhase] = useState<GraphPhase>()
+  const [replay, setReplay] = useState<{ thread: string; trace: Trace }>()
+  const [hiddenTrace, setHiddenTrace] = useState<number>()
+  const nextId = useRef(0)
+  const inFlight = useRef(new Set<string>())
+  const bases = useRef(new Map<number, Workspace>())
+  const workspaceMenu = useRef<HTMLDetailsElement>(null)
+  const chatToggle = useRef<HTMLButtonElement>(null)
 
-  const fgRef = useRef<any>();
-
-  // Reusable arrow geometry
-  const { arrowGeom, arrowMat } = useMemo(() => ({
-    arrowGeom: new THREE.ConeGeometry(1, 2, 8),
-    arrowMat: new THREE.MeshStandardMaterial({ color: 0xff6600 }),
-  }), []);
-
-  // Quick id → node map
-  const nodeById = useMemo(() => {
-    const m: Record<string, BrainNode> = {};
-    graphData.nodes.forEach((n) => (m[n.id] = n));
-    return m;
-  }, [graphData.nodes]);
-
-  // Neighbours of selected node
-  const neighborIds = useMemo(() => {
-    if (!selectedNode) return new Set<string>();
-    const s = new Set<string>();
-    graphData.links.forEach((l) => {
-      const src = l.source as string;
-      const tgt = l.target as string;
-      if (src === selectedNode.id) s.add(tgt);
-      if (tgt === selectedNode.id) s.add(src);
-    });
-    return s;
-  }, [selectedNode, graphData.links]);
-
-  // ── Fetch graph from backend ───────────────────────────────────────────────
   useEffect(() => {
-    (async () => {
-      setGraphLoading(true);
-      try {
-        const res = await fetch(`${BACKEND_URL}/graph`);
-        if (!res.ok) throw new Error("not-ok");
-        const data = await res.json();
+    const controller = new AbortController()
+    fetch('/api/graph', { signal: controller.signal })
+      .then(response => {
+        if (!response.ok) throw new Error('Graph unavailable')
+        return response.json() as Promise<SchoolGraph>
+      })
+      .then(data => setSchool(data))
+      .catch(() => { if (!controller.signal.aborted) setLoadError(true) })
+    return () => controller.abort()
+  }, [attempt])
 
-        const mappedNodes: BrainNode[] = (data.nodes ?? []).map((n: any) => {
-          const section = n.section as "A" | "B" | "C" | undefined;
-          return {
-            id: n.id,
-            label: n.label ?? n.id,
-            cluster: clusterFor(n.role ?? "Other", section),
-            text: n.text ?? "",
-            role: mapRole(n.role ?? "Other"),
-            section,
-            importance: n.importance ?? 1,
-          };
-        });
+  const demo = useMemo(() => school ? { title: 'School graph', nodes: school.nodes, links: school.links } : undefined, [school])
+  const isSchool = workspaceId === 'school'
+  const isSample = workspaceId === 'sample'
+  const workspace = isSchool ? demo : isSample ? messagePassingGraph : saved.find(item => item.id === workspaceId)?.graph ?? demo
+  const nodes = workspace?.nodes ?? []
+  const selectedId = selectedIds[workspaceId] ?? (isSchool ? school?.defaultNode : nodes[0]?.id)
+  const selected = nodes.find(node => node.id === selectedId)
+  const threadKey = [workspaceId, mode, mode === 'local' ? selected?.id : 'graph'].join(':')
+  const thread = threads[threadKey] ?? { turns: [] }
+  const activeTrace = thread.pending ? undefined : replay?.thread === threadKey ? replay.trace : thread.turns.at(-1)?.trace
+  const trace = activeTrace?.id === hiddenTrace ? undefined : activeTrace
+  const term = search.trim().toLocaleLowerCase()
+  const searchResults = term ? nodes.filter(node => [node.label, node.id, node.role, node.section && 'Class ' + node.section, node.subject]
+    .some(value => value?.toLocaleLowerCase().includes(term))).slice(0, 9) : []
+  const phaseNode = trace && phase?.traceId === trace.id ? nodes.find(node => node.id === phase.node) : undefined
+  const source = nodes.find(node => node.id === trace?.source)
+  const scenarios = school?.scenarios ?? []
+  const rolePrompts = selected && selected.role !== 'Student'
+    ? scenarios.filter(scenario => scenario.role === selected.role && (!selected.subject || scenario.subject === selected.subject))
+    : []
+  const prompts = mode === 'assistant' ? ASSISTANT_PROMPTS
+    : isSchool ? (rolePrompts.length ? rolePrompts : scenarios).slice(0, 4)
+      : isSample ? [{ label: 'Try mean aggregation', question: LEARNING_QUESTION }]
+        : [{ label: 'Show this node’s neighbors', question: 'What are the neighbors of this node?' }]
 
-        const mappedLinks: BrainLink[] = (data.links ?? []).map((l: any) => ({
-          source: l.source,
-          target: l.target,
-        }));
+  function updateThread(key: string, update: (current: Thread) => Thread) {
+    setThreads(current => ({ ...current, [key]: update(current[key] ?? { turns: [] }) }))
+  }
 
-        setGraphData({ nodes: mappedNodes, links: mappedLinks });
-        setBackendConnected(true);
-      } catch {
-        setBackendConnected(false);
-      } finally {
-        setGraphLoading(false);
+  function selectNode(node: GraphNode) {
+    setSelectedIds(current => ({ ...current, [workspaceId]: node.id }))
+    setReplay(undefined)
+    setChatOpen(true)
+    setSearch('')
+    setSearchOpen(false)
+  }
+
+  function switchTheme() {
+    const next = theme === 'dark' ? 'light' : 'dark'
+    setTheme(next)
+    try { localStorage.setItem(THEME, next) } catch { /* The current tab still uses the selected theme. */ }
+  }
+
+  function switchWorkspace(id: string) {
+    setWorkspaceId(id)
+    saveActive(id)
+    setSearch('')
+    setSearchOpen(false)
+    setReplay(undefined)
+    workspaceMenu.current?.removeAttribute('open')
+  }
+
+  function persist(items: SavedWorkspace[]) {
+    setSaved(items)
+    try {
+      localStorage.setItem(STORAGE, JSON.stringify(items))
+      setStorageNote('')
+    } catch {
+      setStorageNote('Browser storage is full or unavailable. New changes are in this tab only.')
+    }
+  }
+
+  function addWorkspace(graph: Workspace) {
+    const id = crypto.randomUUID()
+    persist([...saved, { id, graph }])
+    switchWorkspace(id)
+    setChatOpen(true)
+    return id
+  }
+
+  function newWorkspace() {
+    addWorkspace({ title: 'Untitled graph', nodes: [], links: [] })
+    setMode('assistant')
+  }
+
+  async function send(question: string) {
+    if (!workspace || inFlight.current.has(threadKey) || (mode === 'assistant' && !provider)) return
+    const id = ++nextId.current
+    inFlight.current.add(threadKey)
+    setReplay(undefined)
+    updateThread(threadKey, current => ({ turns: current.turns, pending: question }))
+
+    try {
+      let turn: Turn
+      if (mode === 'assistant' && provider) {
+        const history = thread.turns.slice(-4).flatMap(item => [
+          { role: 'user', content: item.question }, { role: 'assistant', content: item.answer },
+        ])
+        const result = await post<AssistantReply>('/assistant', {
+          provider: provider.provider, model: provider.model, query: question,
+          graph: isSchool ? null : workspace, selected: selected?.id ?? null, history,
+        }, AbortSignal.timeout(48_000), provider.key)
+        if (result.proposal) bases.current.set(id, workspace)
+        turn = { id, question, answer: result.answer, proposal: result.proposal, source: providerNames[provider.provider],
+          trace: result.path.length > 1 ? { id, path: result.path, returning: [] } : undefined }
+      } else if (isSchool) {
+        const result = await post<SchoolReply>('/chat', {
+          node: selected?.id, query: question, previousQuestion: thread.turns.at(-1)?.context,
+        }, AbortSignal.timeout(15_000))
+        turn = { id, question, answer: result.answer, context: result.context, source: result.record?.reference,
+          trace: result.route.length > 1 ? { id, path: result.route.map(step => step.node), returning: result.returnPath, source: result.record?.node } : undefined }
+      } else if (isSample && question === LEARNING_QUESTION) {
+        turn = { id, question,
+          answer: 'Topic receives feature values 2, 4, and 6 from three neighbors. Their mean is (2 + 4 + 6) / 3 = 4. A GNN can then combine this aggregate with Topic’s own features and apply a learned transformation.',
+          trace: { id, path: ['sample-a', 'sample-topic', 'sample-rep'], returning: [], incoming: ['sample-b', 'sample-c'] } }
+      } else {
+        const neighboring = new Set(workspace.links.flatMap(link => link.source === selected?.id
+          ? [link.target] : link.target === selected?.id ? [link.source] : []))
+        const names = nodes.filter(node => neighboring.has(node.id)).map(node => node.label)
+        const attached = names.length ? 'Connected to ' + names.join(', ') + '.' : 'This node has no connections.'
+        const answer = selected ? [selected.text, attached].filter(Boolean).join('\n\n')
+          : 'Select a node to inspect its stored information and connections.'
+        turn = { id, question, answer }
       }
-    })();
-  }, []);
-
-  // ── Handlers ───────────────────────────────────────────────────────────────
-
-  const handleNodeClick = (node: any) => {
-    const n = node as BrainNode;
-    setSelectedNode(n);
-    setHighlightedNodeIds(new Set());
-    setHighlightedLinkKeys(new Set());
-
-    if (fgRef.current && node.x !== undefined) {
-      const distance = 120;
-      const distRatio =
-        1 + distance / Math.hypot(node.x || 1, node.y || 1, node.z || 1);
-      fgRef.current.cameraPosition(
-        { x: (node.x || 0) * distRatio, y: (node.y || 0) * distRatio, z: (node.z || 0) * distRatio },
-        node,
-        1000
-      );
+      updateThread(threadKey, current => ({ turns: [...current.turns, turn] }))
+    } catch (failure) {
+      updateThread(threadKey, current => ({ turns: current.turns,
+        error: { message: failure instanceof Error ? failure.message : 'Could not send the message.', question } }))
+    } finally {
+      inFlight.current.delete(threadKey)
     }
-  };
+  }
 
-  const handleBackgroundClick = () => {
-    setSelectedNode(null);
-    setHighlightedNodeIds(new Set());
-    setHighlightedLinkKeys(new Set());
-  };
-
-  // ── Link / node helpers ────────────────────────────────────────────────────
-
-  const isLinkHighlighted = (link: any) => {
-    const src = (link.source as any)?.id ?? link.source;
-    const tgt = (link.target as any)?.id ?? link.target;
-    return highlightedLinkKeys.has(`${src}->${tgt}`);
-  };
-
-  const getNodeColor = (n: any) => {
-    const node = n as BrainNode;
-    const base = NODE_COLORS[node.cluster] ?? "#a855f7";
-
-    if (highlightedNodeIds.size > 0) {
-      return highlightedNodeIds.has(node.id) ? "#facc15" : "rgba(255,255,255,0.05)";
+  function apply(turn: Turn) {
+    if (!turn.proposal || bases.current.get(turn.id) !== workspace || turn.applied) return false
+    bases.current.delete(turn.id)
+    const graph = turn.proposal.graph
+    if (turn.proposal.mode === 'new' || isSchool || isSample) {
+      const copy = turn.proposal.mode === 'edit' && graph.title === workspace?.title ? { ...graph, title: graph.title + ' (edited)' } : graph
+      const id = addWorkspace(copy)
+      updateThread(id + ':assistant:graph', () => ({ turns: [{ ...turn, trace: undefined, applied: true }] }))
+    } else {
+      persist(saved.map(item => item.id === workspaceId ? { ...item, graph } : item))
+      if (selected && !graph.nodes.some(node => node.id === selected.id)) {
+        setSelectedIds(current => ({ ...current, [workspaceId]: graph.nodes[0].id }))
+      }
     }
-    if (!selectedNode) return base;
-    if (node.id === selectedNode.id) return "#facc15";
-    if (neighborIds.has(node.id)) return "#22c55e";
-    return "rgba(255,255,255,0.08)";
-  };
+    updateThread(threadKey, current => ({ ...current,
+      turns: current.turns.map(item => item.id === turn.id ? { ...item, applied: true } : item) }))
+    setReplay(undefined)
+    if (activeTrace) setHiddenTrace(activeTrace.id)
+    return true
+  }
 
-  const getLinkColor = (link: any) =>
-    isLinkHighlighted(link) ? "rgba(255,215,0,0.95)" : "rgba(255,255,255,0.5)";
-
-  const getLinkOpacity = (link: any) => {
-    if (highlightedLinkKeys.size > 0) return isLinkHighlighted(link) ? 1 : 0.06;
-    if (!selectedNode) return 0.35;
-    const src = (link.source as any)?.id ?? link.source;
-    const tgt = (link.target as any)?.id ?? link.target;
-    if (src === selectedNode.id || tgt === selectedNode.id || neighborIds.has(src) || neighborIds.has(tgt))
-      return 0.8;
-    return 0.06;
-  };
-
-  const getLinkWidth = (link: any) => {
-    if (isLinkHighlighted(link)) return 4;
-    if (!selectedNode) return 0.5;
-    const src = (link.source as any)?.id ?? link.source;
-    const tgt = (link.target as any)?.id ?? link.target;
-    if (src === selectedNode.id || tgt === selectedNode.id || neighborIds.has(src) || neighborIds.has(tgt))
-      return 2.5;
-    return 0.3;
-  };
-
-  const getParticleSpeed = (link: any) => {
-    const srcId = (link.source as any)?.id ?? link.source;
-    const tgtId = (link.target as any)?.id ?? link.target;
-    const imp = Math.max(nodeById[srcId]?.importance ?? 1, nodeById[tgtId]?.importance ?? 1);
-    return 0.002 + ((imp - 1) / 4) * 0.018;
-  };
-
-  // ── Render ─────────────────────────────────────────────────────────────────
+  const traceLabel = phaseNode && phase ? phase.stage === 'done'
+    ? source ? 'Answer from ' + source.label : 'Path highlighted'
+    : phase.stage === 'return' ? 'Returning through ' + phaseNode.label
+      : trace?.incoming ? phase.step === 1 ? 'Aggregating neighbor features' : 'Updating representation'
+        : 'Checking ' + phaseNode.label : ''
 
   return (
-    <div className="app-root">
-      {/* ── 3-D Graph ──────────────────────────────────────────────────── */}
-      <div className="graph-panel">
-        {/* Status badge */}
-        <div style={{ position: "absolute", left: 12, top: 12, zIndex: 10 }}>
-          <div
-            style={{
-              display: "inline-flex", alignItems: "center", gap: 8,
-              padding: "6px 12px", background: "rgba(0,0,0,0.6)",
-              borderRadius: 8, color: "#fff", fontSize: 13, backdropFilter: "blur(6px)",
-            }}
-          >
-            <div
-              style={{
-                width: 10, height: 10, borderRadius: 10,
-                background: backendConnected ? "#22c55e" : "#ef4444",
-                boxShadow: backendConnected ? "0 0 6px rgba(34,197,94,0.6)" : "0 0 6px rgba(239,68,68,0.6)",
-              }}
-            />
-            {graphLoading ? "Loading graph…" : backendConnected ? "Backend: Connected" : "Backend: Offline"}
+    <div className="app-shell" data-theme={theme}>
+      <header className="topbar">
+        <div className="topbar-start">
+          <button type="button" className={'provider-trigger icon-button' + (provider ? ' connected' : '')}
+            aria-label="AI provider settings" title={provider ? providerNames[provider.provider] + ' connected' : 'Add AI provider'}
+            onClick={() => setProviderOpen(true)}><Icon name="plug" /></button>
+          <span className="wordmark">GNN Brain</span>
+          <span className="header-divider" />
+          <details className="workspace-menu" ref={workspaceMenu}>
+            <summary><Icon name="network" /><span>{workspace?.title ?? 'School graph'}</span><Icon name="chevron" /></summary>
+            <div className="workspace-list">
+              <button type="button" onClick={() => switchWorkspace('school')} aria-current={isSchool ? 'true' : undefined}>School graph</button>
+              <button type="button" onClick={() => switchWorkspace('sample')} aria-current={isSample ? 'true' : undefined}>Message passing example</button>
+              {saved.map(item => <button key={item.id} type="button" onClick={() => switchWorkspace(item.id)}
+                aria-current={workspaceId === item.id ? 'true' : undefined}>{item.graph.title}</button>)}
+              <button type="button" className="create-workspace" onClick={newWorkspace}><Icon name="plus" /> New graph</button>
+            </div>
+          </details>
+        </div>
+        <div className="topbar-actions">
+          <button type="button" className="theme-toggle icon-button" onClick={switchTheme}
+            aria-label={theme === 'dark' ? 'Switch to Light Studio' : 'Switch to Dark Glass'}
+            title={theme === 'dark' ? 'Switch to Light Studio' : 'Switch to Dark Glass'}>
+            <Icon name={theme === 'dark' ? 'sun' : 'moon'} />
+          </button>
+          <button type="button" ref={chatToggle} className={'chat-toggle' + (chatOpen ? ' pressed' : '')} aria-expanded={chatOpen}
+            onClick={() => setChatOpen(value => !value)}><Icon name="chat" /><span>Chat</span></button>
+        </div>
+      </header>
+
+      <main className={'workbench' + (chatOpen ? ' with-chat' : '')}>
+        <section className="graph-workspace" aria-label="Graph workspace">
+          {workspace && <GraphCanvas graph={workspace} selected={selected?.id ?? null} trace={trace}
+            theme={theme} onSelect={selectNode} onPhase={setPhase} />}
+          <div className="graph-find" onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setSearchOpen(false) }}>
+            <div className="find-field"><Icon name="search" /><input type="search" aria-label="Find a node" placeholder="Find a node…"
+              value={search} onFocus={() => setSearchOpen(true)} onChange={event => { setSearch(event.target.value); setSearchOpen(true) }}
+              onKeyDown={event => {
+                if (event.key === 'Escape') setSearchOpen(false)
+                if (event.key === 'Enter' && searchResults[0]) selectNode(searchResults[0])
+              }} /></div>
+            {searchOpen && term && <div className="find-results">
+              {searchResults.map(node => <button key={node.id} type="button" onClick={() => selectNode(node)}>
+                <i style={{ background: nodeColor(node, theme) }} /><span>{node.label}</span><small>{node.role}{node.section ? ' / ' + node.section : ''}</small>
+              </button>)}
+              {!searchResults.length && <p>No matching nodes</p>}
+            </div>}
           </div>
+
+          {trace && phaseNode && <div className={'trace-status phase-' + phase!.stage} role="status">
+            <i />
+            <span>{traceLabel}</span>
+            {phase!.stage !== 'done' && <small>{phase!.step}/{phase!.total}</small>}
+            <button type="button" className="icon-button" aria-label="Clear highlighted path" onClick={() => setHiddenTrace(trace.id)}><Icon name="close" /></button>
+          </div>}
+
+          {(!workspace || !nodes.length) && <div className="graph-empty">
+            <Icon name="network" />
+            <h1>{loadError && !workspace ? 'School graph unavailable' : workspace ? 'Your graph is empty' : 'Loading school graph'}</h1>
+            {loadError && !workspace ? <button type="button" className="quiet-button" onClick={() => { setLoadError(false); setAttempt(value => value + 1) }}>Try again</button>
+              : workspace ? <button type="button" className="quiet-button" onClick={() => { setMode('assistant'); setChatOpen(true) }}>Create nodes with the assistant <Icon name="arrow" /></button> : null}
+          </div>}
+
+          {workspace && <footer className="graph-info">
+            <span>{nodes.length} nodes <b>·</b> {workspace.links.length} links</span>
+            {isSchool && <div className="graph-legend" aria-label="Node roles">
+              {['Student', 'CR', 'In-charge', 'HOD', 'Dean', 'Director'].map(role =>
+                <span key={role} title={roleLabel[role] ?? role}><i style={{ background: roleColor(role, theme) }} />{role}</span>)}
+            </div>}
+            {storageNote && <small role="status">{storageNote}</small>}
+          </footer>}
+        </section>
+
+        <div className="chat-dock" inert={!chatOpen} aria-hidden={!chatOpen}>
+        <ChatPanel hidden={!chatOpen} threadKey={threadKey} mode={mode} theme={theme}
+          title={workspace?.title ?? 'School graph'} selected={selected}
+          provider={provider} prompts={prompts} library={isSchool && mode === 'local' ? scenarios : []}
+          thread={thread} onMode={setMode} onClose={() => { chatToggle.current?.focus(); setChatOpen(false) }}
+          onProvider={() => setProviderOpen(true)} onSend={send} onApply={apply} onReplay={item => {
+            setReplay({ thread: threadKey, trace: { ...item, id: ++nextId.current } })
+          }} />
         </div>
-
-        <ForceGraph3D
-          ref={fgRef}
-          graphData={graphData}
-          backgroundColor="black"
-          onNodeClick={handleNodeClick}
-          onBackgroundClick={handleBackgroundClick}
-          nodeLabel={(n: any) => {
-            const node = n as BrainNode;
-            return `<b>${node.label}</b><br/>Role: ${node.role}<br/>Section: ${node.section ?? "—"}`;
-          }}
-          nodeRelSize={4}
-          nodeAutoColorBy="cluster"
-          nodeColor={getNodeColor}
-          linkColor={getLinkColor}
-          linkOpacity={getLinkOpacity}
-          linkWidth={getLinkWidth}
-          linkDirectionalParticles={2}
-          linkDirectionalParticleSpeed={getParticleSpeed}
-          linkDirectionalParticleWidth={2}
-          linkDirectionalParticleColor={() => "rgba(255,255,255,0.9)"}
-          linkDirectionalArrowLength={10}
-          linkDirectionalArrowRelPos={0.85}
-          linkDirectionalArrowColor={() => "rgba(255,255,255,0.9)"}
-          linkThreeObjectExtend={true}
-          linkThreeObject={() => null}
-          linkThreeObjectUpdate={(obj: any) => { if (obj) obj.visible = false; }}
-        />
-      </div>
-
-      {/* ── Side Panel ──────────────────────────────────────────────────── */}
-      <div className="side-panel">
-        <h2>🧠 GNN Brain Graph</h2>
-
-        {selectedNode ? (
-          <>
-            <h3>Selected Node</h3>
-            <p>
-              <strong>Label:</strong> {selectedNode.label}<br />
-              <strong>Role:</strong> {selectedNode.role}<br />
-              <strong>Section:</strong> {selectedNode.section ?? "—"}<br />
-              <strong>Importance:</strong> {selectedNode.importance}
-            </p>
-
-            <h4>Description</h4>
-            <p style={{ fontSize: 13, color: "#94a3b8" }}>{selectedNode.text}</p>
-
-            <h4>Neighbours</h4>
-            <ul style={{ fontSize: 13 }}>
-              {graphData.nodes
-                .filter((n) => neighborIds.has(n.id))
-                .map((n) => (
-                  <li key={n.id}>
-                    <span
-                      style={{
-                        display: "inline-block", width: 10, height: 10,
-                        borderRadius: "50%", background: NODE_COLORS[n.cluster] ?? "#a855f7",
-                        marginRight: 6,
-                      }}
-                    />
-                    {n.label} <span style={{ color: "#64748b" }}>({n.role})</span>
-                  </li>
-                ))}
-            </ul>
-
-            <div style={{ marginTop: 12, display: "flex", gap: 8 }}>
-              <button
-                className="btn"
-                onClick={() => { setHighlightedNodeIds(new Set()); setHighlightedLinkKeys(new Set()); }}
-              >
-                Clear highlights
-              </button>
-            </div>
-          </>
-        ) : (
-          <p style={{ color: "#94a3b8", fontSize: 14 }}>
-            Click any node in the graph to select it and start a conversation.
-          </p>
-        )}
-
-        {/* Legend */}
-        <div style={{ marginTop: 24 }}>
-          <h4>Legend</h4>
-          {[
-            { color: "#22c55e", label: "Section A Students" },
-            { color: "#f97316", label: "Section B Students" },
-            { color: "#6366f1", label: "Section C Students" },
-            { color: "#eab308", label: "HOD" },
-            { color: "#ef4444", label: "Dean" },
-            { color: "#0ea5e9", label: "Admin" },
-            { color: "#ec4899", label: "Projects" },
-            { color: "#a855f7", label: "Other" },
-          ].map(({ color, label }) => (
-            <div key={label} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
-              <div style={{ width: 12, height: 12, borderRadius: "50%", background: color, flexShrink: 0 }} />
-              <span style={{ fontSize: 13, color: "#cbd5e1" }}>{label}</span>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* ── Chat Panel ──────────────────────────────────────────────────── */}
-      <ChatPanel
-        nodeId={selectedNode?.id || null}
-        nodeLabel={selectedNode?.label || null}
-        backendUrl={BACKEND_URL}
-        onSourcesReturned={(sources) => {
-          setHighlightedNodeIds(new Set(sources));
-          setHighlightedLinkKeys(new Set());
-        }}
-      />
+      </main>
+      {providerOpen && <ProviderDialog current={provider} onClose={() => setProviderOpen(false)}
+        onConnect={connection => { setProvider(connection); setProviderOpen(false); setMode('assistant'); setChatOpen(true) }}
+        onDisconnect={() => { setProvider(null); setProviderOpen(false) }} />}
     </div>
-  );
-};
+  )
+}
 
-export default App;
+export default App
