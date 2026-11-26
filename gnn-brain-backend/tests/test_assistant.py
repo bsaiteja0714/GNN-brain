@@ -12,6 +12,20 @@ BASE = Workspace(title="Example", nodes=[{"id": "a", "label": "A"}, {"id": "b", 
 
 
 class GraphAssistantTests(unittest.TestCase):
+    @patch("app.api.assistant.provider_request")
+    def test_social_turn_uses_provider_without_traversal(self, call):
+        call.return_value = {"action": "reply", "answer": "Doing well, thanks!"}
+        request = AssistantRequest(provider="openai", model="test", query="Hey! How are you?")
+        self.assertEqual(ask_assistant(request, "test-key"), {"answer": "Doing well, thanks!", "path": [], "proposal": None})
+        call.assert_called_once()
+
+    @patch("app.api.assistant.provider_request")
+    def test_general_question_does_not_send_graph_or_use_a_returned_path(self, call):
+        call.return_value = {"action": "reply", "answer": "Paris."}
+        request = AssistantRequest(provider="openai", model="test", query="What is the capital of France?")
+        self.assertEqual(ask_assistant(request, "test-key")["path"], [])
+        self.assertFalse(any("Graph snapshot" in item["content"] for item in call.call_args.args[2]))
+
     def test_edit_is_validated_without_mutating_original(self):
         result = apply_changes(BASE, Changes(mode="edit", removeNodes=["b"],
                                              upsertNodes=[{"id": "c", "label": "C"}],
@@ -39,11 +53,11 @@ class GraphAssistantTests(unittest.TestCase):
 
     @patch("app.api.assistant.provider_request")
     def test_assistant_receives_whole_school_and_returns_validated_proposal(self, call):
-        call.return_value = {"answer": "Here is a new example.", "path": ["director", "dean"], "proposal": {
+        call.side_effect = [{"action": "graph"}, {"answer": "Here is a new example.", "path": ["director", "dean"], "proposal": {
             "mode": "new", "title": "Test graph",
             "upsertNodes": [{"id": "input", "label": "Input"}, {"id": "output", "label": "Output"}],
             "addLinks": [{"source": "input", "target": "output"}],
-        }}
+        }}]
         result = ask_assistant(AssistantRequest(provider="openai", model="test", query="Create a graph",
                                                selected="S-A-1"), "test-key")
         _, _, messages, _ = call.call_args.args
@@ -55,6 +69,19 @@ class GraphAssistantTests(unittest.TestCase):
         self.assertEqual([record["owner"] for record in records if record["reference"] == "Fictional student profile"], ["S-A-1"])
         self.assertEqual(result["path"], ["director", "dean"])
         self.assertEqual(result["proposal"]["graph"].title, "Test graph")
+
+    @patch("app.api.assistant.provider_request")
+    def test_implicit_lookup_returns_actual_route_and_uses_evidence(self, call):
+        call.side_effect = [
+            {"action": "lookup", "topic": "student-id", "query": "How do I replace my lost student ID?"},
+            {"answer": "The front office can give you a temporary pass."},
+        ]
+        request = AssistantRequest(provider="openai", model="test", query="my badge is gone", selected="S-C-2")
+        result = ask_assistant(request, "test-key")
+        self.assertEqual(result["path"][0], "S-C-2")
+        self.assertEqual(result["path"][-1], "director")
+        _, _, messages, _ = call.call_args.args
+        self.assertIn("front office", messages[1]["content"])
 
     @patch("app.api.assistant.provider_request")
     def test_connection_check_sends_no_graph(self, call):

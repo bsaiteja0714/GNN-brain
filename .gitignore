@@ -11,11 +11,22 @@ env/
 dist/
 build/
 .env
+.env.*
+!.env.example
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
 
 # Node
 node_modules/
 dist/
 .vite/
+dist-ssr/
+*.tsbuildinfo
+*.local
 
 # IDE
 .vscode/
@@ -30,6 +41,9 @@ Thumbs.db
 # Logs
 *.log
 npm-debug.log*
+*.tmp
+*.bak
+*.swp
 
 # FAISS index files (generated at runtime)
 *.index

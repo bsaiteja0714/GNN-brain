@@ -480,3 +480,29 @@
   .workbench, .workbench.with-chat, .chat-dock, .icon-button, .chat-toggle,
   .quiet-button, .primary-button, .graph-tools button { transition: none; }
 }
+
+.chat-dock { position: relative; }
+.chat-resize-handle {
+  position: absolute;
+  inset: 12px auto 12px 0;
+  width: var(--gap);
+  z-index: 1;
+  cursor: col-resize;
+  touch-action: none;
+  outline-offset: -2px;
+}
+.chat-resize-handle::after {
+  content: '';
+  position: absolute;
+  inset: 0 calc(50% - 1px);
+  background: var(--accent);
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.chat-resize-handle:hover::after, .chat-resize-handle:focus-visible::after,
+.resizing-chat .chat-resize-handle::after { opacity: .6; }
+.resizing-chat, .resizing-chat.with-chat { transition: none; user-select: none; cursor: col-resize; }
+@media (max-width: 690px) {
+  .chat-dock { position: absolute; }
+  .chat-resize-handle { display: none; }
+}

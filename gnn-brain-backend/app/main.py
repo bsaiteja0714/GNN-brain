@@ -1,3 +1,5 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import networkx as nx
@@ -5,8 +7,16 @@ import networkx as nx
 from app.api.assistant import router as assistant_router
 from app.api.chat import router as chat_router
 from app.graph.brain import bot_engine
+from app.graph.semantic import knowledge_index
 
-app = FastAPI(title="GNN Brain")
+
+@asynccontextmanager
+async def lifespan(_app):
+    knowledge_index.warm()
+    yield
+
+
+app = FastAPI(title="GNN Brain", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],

@@ -1,10 +1,65 @@
 import unittest
+from unittest.mock import patch
 
+from app.api.chat import ChatRequest, ChatTurn, chat_endpoint
 from app.graph.brain import bot_engine
 from app.graph.knowledge import SCHOOL_RECORDS, SCHOOL_SCENARIOS
 
 
 class SchoolRoutingTests(unittest.TestCase):
+    def test_new_event_list_request_does_not_inherit_an_unrelated_topic(self):
+        reply = bot_engine.chat("S-A-1", "what are the events that are there", "cant find my badge")
+        self.assertIn("Founders Day", reply["answer"])
+        self.assertIn("Sports Day", reply["answer"])
+        self.assertNotIn("front office", reply["answer"])
+
+    def test_paraphrases_and_misspellings_retrieve_school_records(self):
+        for question, owner in (
+            ("cant find my badge", "director"),
+            ("when is foundrs dy", "dean"),
+            ("need to catch up on what we did", "CR-A"),
+        ):
+            with self.subTest(question=question):
+                self.assertEqual(bot_engine.chat("S-A-1", question)["record"]["node"], owner)
+
+    def test_unknown_information_names_the_unanswered_request(self):
+        question = "When is the chess tournament?"
+        result = bot_engine.chat("S-A-1", question)
+        self.assertEqual(result["status"], "unresolved")
+        self.assertIn(question, result["answer"])
+
+    def test_reporting_question_uses_the_selected_class(self):
+        reply = bot_engine.chat("S-E-2", "who should i go to first")
+        self.assertIn(bot_engine.node_metadata["CR-E"].label, reply["answer"])
+        self.assertEqual(reply["route"], [])
+
+    @patch("app.api.assistant.provider_request")
+    def test_node_chat_uses_connected_provider_and_passes_class_context(self, call):
+        call.return_value = {"action": "reply", "answer": "Hi! Good to hear from you."}
+        request = ChatRequest(node="S-C-2", query="hii there", provider={"provider": "openai", "model": "test"})
+        result = chat_endpoint(request, "test-key")
+        self.assertEqual(result["answer"], "Hi! Good to hear from you.")
+        self.assertEqual(result["route"], [])
+        self.assertIn('"section": "C"', call.call_args.args[2][1]["content"])
+
+    def test_conversation_and_unclear_requests_do_not_traverse(self):
+        with patch.object(bot_engine.gnn, "choose", side_effect=AssertionError("unexpected traversal")):
+            for message in ("Hey there, how are you doing today?", "Thanks so much!", "I appreciate your help.",
+                            "That makes sense.", "Can you help me with school?", "I like school."):
+                with self.subTest(message=message):
+                    self.assertEqual(bot_engine.chat("S-A-1", message)["route"], [])
+
+    def test_follow_up_keeps_grounded_context_after_an_acknowledgement(self):
+        question = "When is Founders Day?"
+        first = bot_engine.chat("S-A-1", question)
+        result = chat_endpoint(ChatRequest(node="S-A-1", query="And where is it?", history=[
+            ChatTurn(question=question, answer=first["answer"], context=first["context"]),
+            ChatTurn(question="Thanks!", answer="You’re welcome."),
+        ]))
+        self.assertEqual(result["context"], question)
+        self.assertIn("auditorium", result["answer"])
+        self.assertEqual(result["record"]["node"], "dean")
+
     def test_school_has_five_complete_class_reporting_chains(self):
         graph = bot_engine.graph_data()
         self.assertEqual([item["studentCount"] for item in graph["classes"]], [35] * 5)

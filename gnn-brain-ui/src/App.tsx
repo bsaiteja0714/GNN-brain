@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import type { CSSProperties, PointerEvent } from 'react'
 import ChatPanel from './ChatPanel'
 import type { Mode, Thread, Turn } from './ChatPanel'
 import GraphCanvas from './GraphCanvas'
@@ -14,6 +15,9 @@ type SavedWorkspace = { id: string; graph: Workspace }
 const STORAGE = 'gnn-brain.workspaces.v1'
 const ACTIVE = 'gnn-brain.active-workspace.v1'
 const THEME = 'gnn-brain.theme.v1'
+const DRAWER_WIDTH = 'gnn-brain.drawer-width.v1'
+const MIN_DRAWER = 310
+const MAX_DRAWER = 720
 const ASSISTANT_PROMPTS = [
   { label: 'Explain this graph', question: 'Explain what the nodes and links represent in this graph and how information moves through it. Show one example path.' },
   { label: 'How does a GNN learn?', question: 'Use this graph to explain a GNN message-passing layer, neighborhood aggregation, and what weights are learned. Show an example path.' },
@@ -51,6 +55,11 @@ function App() {
   const [threads, setThreads] = useState<Record<string, Thread>>({})
   const [mode, setMode] = useState<Mode>('local')
   const [chatOpen, setChatOpen] = useState(true)
+  const [preferredWidth, setPreferredWidth] = useState(() => {
+    try { return Number(localStorage.getItem(DRAWER_WIDTH)) || 0 } catch { return 0 }
+  })
+  const [availableWidth, setAvailableWidth] = useState(0)
+  const [resizing, setResizing] = useState(false)
   const [provider, setProvider] = useState<Provider | null>(null)
   const [providerOpen, setProviderOpen] = useState(false)
   const [loadError, setLoadError] = useState(false)
@@ -66,6 +75,18 @@ function App() {
   const bases = useRef(new Map<number, Workspace>())
   const workspaceMenu = useRef<HTMLDetailsElement>(null)
   const chatToggle = useRef<HTMLButtonElement>(null)
+  const workbench = useRef<HTMLElement>(null)
+  const drawer = useRef<HTMLDivElement>(null)
+  const resizeDrag = useRef<{ pointer: number; start: number; width: number } | null>(null)
+  const lastWidth = useRef(0)
+
+  useEffect(() => {
+    const element = workbench.current
+    if (!element) return
+    const observer = new ResizeObserver(([entry]) => setAvailableWidth(entry.contentRect.width))
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -103,6 +124,33 @@ function App() {
     : isSchool ? (rolePrompts.length ? rolePrompts : scenarios).slice(0, 4)
       : isSample ? [{ label: 'Try mean aggregation', question: LEARNING_QUESTION }]
         : [{ label: 'Show this node’s neighbors', question: 'What are the neighbors of this node?' }]
+  const maxDrawer = Math.max(MIN_DRAWER, Math.min(MAX_DRAWER, Math.floor(availableWidth) - 340))
+  const drawerWidth = Math.min(maxDrawer, Math.max(MIN_DRAWER, preferredWidth || Math.min(390, availableWidth * .28)))
+
+  function changeDrawerWidth(width: number, persist = false) {
+    const next = Math.round(Math.min(maxDrawer, Math.max(MIN_DRAWER, width)))
+    lastWidth.current = next
+    setPreferredWidth(next)
+    if (persist) {
+      try { localStorage.setItem(DRAWER_WIDTH, String(next)) } catch { /* Keep the width for this session. */ }
+    }
+  }
+
+  function startResize(event: PointerEvent<HTMLDivElement>) {
+    if (event.button !== 0 || !event.isPrimary) return
+    const width = Math.round(drawer.current?.querySelector('.chat-panel')?.getBoundingClientRect().width ?? drawerWidth)
+    lastWidth.current = width
+    resizeDrag.current = { pointer: event.pointerId, start: event.clientX, width }
+    event.currentTarget.setPointerCapture(event.pointerId)
+    setResizing(true)
+  }
+
+  function finishResize(event: PointerEvent<HTMLDivElement>) {
+    if (resizeDrag.current?.pointer !== event.pointerId) return
+    resizeDrag.current = null
+    setResizing(false)
+    changeDrawerWidth(lastWidth.current, true)
+  }
 
   function updateThread(key: string, update: (current: Thread) => Thread) {
     setThreads(current => ({ ...current, [key]: update(current[key] ?? { turns: [] }) }))
@@ -170,28 +218,23 @@ function App() {
         const result = await post<AssistantReply>('/assistant', {
           provider: provider.provider, model: provider.model, query: question,
           graph: isSchool ? null : workspace, selected: selected?.id ?? null, history,
-        }, AbortSignal.timeout(48_000), provider.key)
+        }, AbortSignal.timeout(85_000), provider.key)
         if (result.proposal) bases.current.set(id, workspace)
         turn = { id, question, answer: result.answer, proposal: result.proposal, source: providerNames[provider.provider],
           trace: result.path.length > 1 ? { id, path: result.path, returning: [] } : undefined }
-      } else if (isSchool) {
-        const result = await post<SchoolReply>('/chat', {
-          node: selected?.id, query: question, previousQuestion: thread.turns.at(-1)?.context,
-        }, AbortSignal.timeout(15_000))
-        turn = { id, question, answer: result.answer, context: result.context, source: result.record?.reference,
-          trace: result.route.length > 1 ? { id, path: result.route.map(step => step.node), returning: result.returnPath, source: result.record?.node } : undefined }
       } else if (isSample && question === LEARNING_QUESTION) {
         turn = { id, question,
           answer: 'Topic receives feature values 2, 4, and 6 from three neighbors. Their mean is (2 + 4 + 6) / 3 = 4. A GNN can then combine this aggregate with Topic’s own features and apply a learned transformation.',
           trace: { id, path: ['sample-a', 'sample-topic', 'sample-rep'], returning: [], incoming: ['sample-b', 'sample-c'] } }
       } else {
-        const neighboring = new Set(workspace.links.flatMap(link => link.source === selected?.id
-          ? [link.target] : link.target === selected?.id ? [link.source] : []))
-        const names = nodes.filter(node => neighboring.has(node.id)).map(node => node.label)
-        const attached = names.length ? 'Connected to ' + names.join(', ') + '.' : 'This node has no connections.'
-        const answer = selected ? [selected.text, attached].filter(Boolean).join('\n\n')
-          : 'Select a node to inspect its stored information and connections.'
-        turn = { id, question, answer }
+        const result = await post<SchoolReply>('/chat', {
+          node: selected?.id, query: question, graph: isSchool ? undefined : workspace,
+          previousQuestion: thread.turns.slice().reverse().find(item => item.context)?.context,
+          history: thread.turns.slice(-8).map(({ question, answer, context }) => ({ question, answer, context })),
+          provider: provider ? { provider: provider.provider, model: provider.model } : undefined,
+        }, AbortSignal.timeout(provider ? 85_000 : 15_000), provider?.key)
+        turn = { id, question, answer: result.answer, context: result.context, source: result.record?.reference,
+          trace: result.route.length > 1 ? { id, path: result.route.map(step => step.node), returning: result.returnPath, source: result.record?.node } : undefined }
       }
       updateThread(threadKey, current => ({ turns: [...current.turns, turn] }))
     } catch (failure) {
@@ -260,7 +303,8 @@ function App() {
         </div>
       </header>
 
-      <main className={'workbench' + (chatOpen ? ' with-chat' : '')}>
+      <main ref={workbench} className={'workbench' + (chatOpen ? ' with-chat' : '') + (resizing ? ' resizing-chat' : '')}
+        style={preferredWidth ? { '--drawer-width': drawerWidth + 'px' } as CSSProperties : undefined}>
         <section className="graph-workspace" aria-label="Graph workspace">
           {workspace && <GraphCanvas graph={workspace} selected={selected?.id ?? null} trace={trace}
             theme={theme} onSelect={selectNode} onPhase={setPhase} />}
@@ -303,7 +347,22 @@ function App() {
           </footer>}
         </section>
 
-        <div className="chat-dock" inert={!chatOpen} aria-hidden={!chatOpen}>
+        <div className="chat-dock" ref={drawer} inert={!chatOpen} aria-hidden={!chatOpen}>
+        <div className="chat-resize-handle" role="separator" aria-label="Chat panel width"
+          aria-orientation="vertical" aria-valuemin={MIN_DRAWER} aria-valuemax={maxDrawer}
+          aria-valuenow={drawerWidth} tabIndex={chatOpen ? 0 : -1}
+          onPointerDown={startResize}
+          onPointerMove={event => {
+            const drag = resizeDrag.current
+            if (drag?.pointer === event.pointerId) changeDrawerWidth(drag.width + drag.start - event.clientX)
+          }}
+          onPointerUp={finishResize} onPointerCancel={finishResize} onLostPointerCapture={finishResize}
+          onKeyDown={event => {
+            const width = { ArrowLeft: drawerWidth + 24, ArrowRight: drawerWidth - 24, Home: MIN_DRAWER, End: maxDrawer }[event.key]
+            if (width === undefined) return
+            event.preventDefault()
+            changeDrawerWidth(width, true)
+          }} />
         <ChatPanel hidden={!chatOpen} threadKey={threadKey} mode={mode} theme={theme}
           title={workspace?.title ?? 'School graph'} selected={selected}
           provider={provider} prompts={prompts} library={isSchool && mode === 'local' ? scenarios : []}

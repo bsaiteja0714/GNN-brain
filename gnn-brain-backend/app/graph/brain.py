@@ -7,12 +7,15 @@ from dataclasses import asdict
 import networkx as nx
 
 from app.graph.data import LINKS, NODES, SECTIONS, SUBJECTS
+from app.graph.conversation import classify, social_reply, without_lead_in
 from app.graph.gnn_model import GNN, words
 from app.graph.knowledge import SCHOOL_RECORDS, SCHOOL_SCENARIOS
+from app.graph.semantic import knowledge_index
 
-GREETING = re.compile(r"^(?:hi|hey|hello|good (?:morning|afternoon|evening))[! .]*$", re.I)
 IDENTITY = re.compile(r"^(?:who are you|tell me about yourself|introduce yourself)[?.! ]*$", re.I)
 EVENT = re.compile(r"\b(events?|fest|celebration|function)\b")
+EVENT_LIST = re.compile(r"\b(?:what|which|list|show|any|upcoming)\b.*\bevents\b|^events$")
+EVENT_TOPICS = ("field-trip", "sports-day", "science-fair", "founders-day", "debate-tryouts")
 GENERIC_EVENT_WORDS = {
     "which", "the", "an", "a", "is", "when", "where", "what", "date", "time", "for",
     "in", "on", "our", "college", "school", "campus", "respective", "this", "that",
@@ -78,14 +81,21 @@ class ChatbotEngine:
             "demo": True,
         }
 
-    def chat(self, sender_node_label_or_id, message, previous_question=None):
+    def node_context(self, start):
+        node = self.node_metadata[start]
+        return {**asdict(node), "reportsTo": [asdict(self.node_metadata[parent]) for parent in self.G.successors(start)]}
+
+    def chat(self, sender_node_label_or_id, message, previous_question=None, has_history=False,
+             *, topic_hint=None, institutional=False):
         start = self.resolve(sender_node_label_or_id or "S-A-1")
         if start is None:
             raise KeyError(sender_node_label_or_id)
         node = self.node_metadata[start]
+        message = without_lead_in(message)
         text = normalized(message)
         context = message
-        if GREETING.fullmatch(message) or IDENTITY.fullmatch(message):
+        lookup_text = message
+        if IDENTITY.fullmatch(message):
             return self.result(
                 f"I’m {node.label}. {node.text} Ask me about a school notice, class activity, or policy.",
                 "local", [start], start,
@@ -96,10 +106,51 @@ class ChatbotEngine:
             return self.result(f"{representative.label} is the Class {node.section} representative.",
                                "local", [start], start)
 
-        if previous_question and FOLLOW_UP.fullmatch(message.casefold()):
+        topics = {topic_hint} if topic_hint else matching_topics(message)
+        intent = classify(message, matched=bool(topics), previous_graph=bool(previous_question))
+        social = social_reply(intent, name=node.label, has_history=has_history or bool(previous_question))
+        if social:
+            return self.result(social, "local", [start])
+        if not topics and EVENT_LIST.search(text):
+            notices = [self.chat(start, message, topic_hint=topic) for topic in EVENT_TOPICS]
+            published = [notice for notice in notices if notice["record"]]
+            if published:
+                answer = "I found these event notices:\n\n" + "\n\n".join(
+                    notice["answer"] for notice in published
+                )
+                return self.result(answer, "local", [start], context=message)
+        if previous_question and not topics and FOLLOW_UP.fullmatch(message.casefold()):
             context = previous_question
+            lookup_text = previous_question
             message = f"{previous_question} {message}"
             text = normalized(message)
+            topics = matching_topics(message)
+
+        if not topics and EVENT.search(text) and words(text) <= GENERIC_EVENT_WORDS:
+            return self.result("Which event do you mean? Share its name, such as Founders Day.",
+                               "clarify", [start])
+        if not topics and not institutional:
+            candidates = knowledge_index.rank(lookup_text)
+            if candidates:
+                top, score = candidates[0]
+                margin = score - (candidates[1][1] if len(candidates) > 1 else 0)
+                if score >= .56 and margin >= .075:
+                    topics = {top}
+                elif score >= .56 and len(candidates) > 1:
+                    options = [
+                        next(record.title for record in SCHOOL_RECORDS
+                             if record.topic == key and record.section in {None, node.section})
+                        for key, _ in candidates[:2]
+                        if any(record.topic == key and record.section in {None, node.section} for record in SCHOOL_RECORDS)
+                    ]
+                    if len(options) == 2:
+                        return self.result(f"Are you asking about {options[0].lower()} or {options[1].lower()}?",
+                                           "clarify", [start])
+        if not topics and not institutional and intent in {"general", "clarify"}:
+            if len(words(text)) <= 3 or intent == "clarify":
+                return self.result("What would you like to find out?", "clarify", [start])
+            return self.result(f"I don’t have enough information to answer “{message}” from {node.label}’s school records.",
+                               "unresolved", [])
 
         mentioned_sections = {section.upper() for section in SECTION.findall(message.casefold())}
         if node.section and mentioned_sections - {node.section}:
@@ -108,15 +159,14 @@ class ChatbotEngine:
                 "Choose someone from the other class to ask about their notices.", "clarify", [start],
             )
 
-        topics = matching_topics(message)
         if len(topics) > 1:
             return self.result("I found several topics in that question. Which one should I check first?",
                                "clarify", [start])
-        if not topics and EVENT.search(text) and words(text) <= GENERIC_EVENT_WORDS:
-            return self.result("Which event do you mean? Share its name, such as Founders Day.",
-                               "clarify", [start])
-
         topic = next(iter(topics), None)
+        if topic == "reporting-line":
+            parents = [f"{parent['label']} ({parent['role']})" for parent in self.node_context(start)["reportsTo"]]
+            answer = f"{node.label} reports to {', '.join(parents)}." if parents else f"{node.label} is at the top of this reporting hierarchy."
+            return self.result(answer, "local", [start], context=context)
         if topic == "student-profile" and node.roll is None:
             return self.result("Choose a student or class representative to ask about their own projects and interests.",
                                "clarify", [start])
@@ -145,11 +195,9 @@ class ChatbotEngine:
                 authority_route, record = min(options, key=lambda option: len(option[0]))
                 return self.result(record.answer, "answered", authority_route, record.owner, record, context)
 
-        return self.result(
-            "I checked the reporting chain and couldn’t find a published answer. "
-            "Share the exact notice name or ask the relevant school office to confirm.",
-            "unresolved", route,
-        )
+        endpoint = self.node_metadata[route[-1]].label
+        return self.result(f"I couldn’t find a published answer for “{context}” in the records from {node.label} through {endpoint}.",
+                           "unresolved", route, context=context)
 
     @staticmethod
     def result(answer, status, route, source=None, record=None, context=None):

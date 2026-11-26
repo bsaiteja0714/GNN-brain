@@ -1,8 +1,37 @@
-# GNN Brain
+# GNN Brain — An AI-Powered Graph Intelligence and Explainable Knowledge Routing Platform
 
 **Ask a school question and watch it travel through the network.** GNN Brain combines an interactive graph, source-backed node chat, and a small graph-convolution model that routes subject questions.
 
 The fictional school has **207 nodes**, **226 links**, and **34 searchable example questions**. Five classes of 35 students are connected through class representatives, subject in-charges, department heads, the Dean, and the Director.
+
+## Project objectives
+
+- Make knowledge ownership and escalation visible.
+- Show how graph convolution can help choose a routing branch.
+- Let users explore, explain, and draft graph structures in the same workspace.
+
+## Key features
+
+- Interactive Canvas graph with node search, zoom, pan, dragging, and adjustable labels, arrows and motion.
+- Source-backed school chat with animated outward and return routes and replay.
+- Resizable, collapsible chat panel, separate mode histories, and light and dark themes.
+- Optional Graph Assistant for contextual conversation, graph explanations, and validated graph proposals.
+- Browser-local custom workspaces and a standalone mean-aggregation example.
+
+## System architecture
+
+```mermaid
+flowchart LR
+    UI["React and TypeScript workbench"] --> Canvas["D3 Force and Canvas"]
+    UI <--> Local["Browser localStorage"]
+    UI --> Proxy["Vite /api proxy"]
+    Proxy --> Backend["FastAPI"]
+    Backend --> Engine["NetworkX school graph and demo records"]
+    Engine --> Ranker["NumPy graph-convolution ranker"]
+    Backend --> Provider["Optional OpenAI, Groq or Gemini provider"]
+```
+
+The frontend uses React, TypeScript, Vite, D3 Force and Canvas 2D. The backend uses FastAPI, Pydantic, NetworkX and NumPy. Read the [technical report](GNN_BRAIN_PROJECT_REPORT.md) for the API, data structures and request workflows.
 
 ## Quick start
 
@@ -64,17 +93,25 @@ Select a student and ask **“When is Founders Day?”** The question travels th
 
 Use **Question library** to browse more examples. Search for a node by name or role, drag nodes to explore connections, and use **Fit graph** to reset the view. The graph menu also includes a standalone mean-aggregation example.
 
-## How routing works
+## GNN-assisted routing
 
 Each node checks its own records before passing the question onward. At a class representative’s subject branch, the model aggregates neighboring HOD signals and ranks the available in-charges. General school questions start on the Science branch. If a relevant published record is reachable outside the upward chain, the app can consult its owner within the class or school-wide scope. Answers cite their demo record, and unrecognized questions return an unresolved result.
 
 The frontend uses React, TypeScript, Vite, and a D3 force layout rendered on Canvas. The backend uses FastAPI, NetworkX, and NumPy. The [school graph](gnn-brain-backend/app/graph/data.py), [knowledge records](gnn-brain-backend/app/graph/knowledge.py), and [routing model](gnn-brain-backend/app/graph/gnn_model.py) are separate so they can be inspected independently.
 
-## Optional graph assistant
+The routing model performs one graph-convolution step over subject staff. It averages token-match signals from an in-charge and their connected HOD, then ranks the candidate branches using two weights fitted by ridge-regularized least squares on bundled examples. The resulting branch score guides traversal. The school engine retrieves the actual answer from a record owned by a reachable node.
+
+## Node Chat and Graph Assistant
+
+**Node Chat** starts from the selected node and keeps a separate thread for that node. It works without an API key. When a provider is connected, the model can interpret follow-ups and phrase answers from retrieved evidence. Casual replies can skip graph traversal.
+
+**Graph Assistant** keeps a workspace-wide thread. It uses a connected provider to answer questions about the graph, illustrate relationships, or propose new graphs and edits. Review a validated proposal and choose **Apply** to save it locally. Editors work on a copy when starting from a built-in graph.
+
+### Connect an AI provider
 
 Open the plug icon and choose **OpenAI**, **Groq**, or **Google AI Studio (Gemini)**. Enter your API key and a model that supports JSON output. The assistant can explain the active graph, show a valid example path, or propose a graph edit for you to review and apply. Custom graphs are saved in the browser.
 
-Verification sends a short test message. Assistant requests send the active graph, the question, and recent chat to your selected provider through the local backend. For the demo school, this includes fictional public records and the selected student’s demo profile. Your key stays in the open tab’s memory. [Get a Gemini API key](https://aistudio.google.com/api-keys)
+Select the provider, enter a model ID that supports JSON output and paste your key. Choose **Connect** to run a short verification request. Provider-backed chat can send your message, recent history, node context and retrieved evidence. Graph Assistant can also send the active graph snapshot and the relevant demo data. The key is held in tab memory and sent through the local backend to the selected provider. [Get a Gemini API key](https://aistudio.google.com/api-keys)
 
 ## Checks
 
@@ -84,8 +121,29 @@ python -m unittest discover -s tests
 
 # From gnn-brain-ui
 npm run lint
+npm exec -- tsc -b
 npm run build
 ```
+
+## Current limitations
+
+- School data is fictional and bundled with the application. There is no shared graph database or document ingestion.
+- Custom graphs support immediate-neighbor Node Chat and provider-assisted snapshot reasoning. The school routing engine is specific to the demo hierarchy.
+- Chat history is session-local. Custom graphs and selected preferences persist in the browser.
+- The demo has no product accounts or role-based access control. Use fictional or otherwise appropriate data with external providers.
+
+## Roadmap
+
+The following are future development areas.
+
+- Persistent graph database and shared workspaces.
+- Advanced GNN architecture and evaluation against routing baselines.
+- Generalized knowledge routing for custom graphs.
+- Document ingestion and knowledge management.
+- Improved semantic retrieval and source ranking.
+- Persistent conversational memory.
+- Authentication and role-based access control.
+- Scalability and performance optimization.
 
 ## Demo data
 
