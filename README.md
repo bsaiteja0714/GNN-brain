@@ -105,13 +105,15 @@ The routing model performs one graph-convolution step over subject staff. It ave
 
 **Node Chat** starts from the selected node and keeps a separate thread for that node. It works without an API key. When a provider is connected, the model can interpret follow-ups and phrase answers from retrieved evidence. Casual replies can skip graph traversal.
 
-**Graph Assistant** keeps a workspace-wide thread. It uses a connected provider to answer questions about the graph, illustrate relationships, or propose new graphs and edits. Review a validated proposal and choose **Apply** to save it locally. Editors work on a copy when starting from a built-in graph.
+**Graph Assistant** keeps a workspace-wide thread. It uses a connected provider to answer questions about the graph, illustrate relationships, or propose new graphs and edits. Review a validated proposal and choose **Create graph** or **Apply edits** to save it locally. Edits to a built-in graph are saved as a separate workspace. When requesting a new school student, specify the class, such as “Add a student named Avery Example to Class B.”
 
 ### Connect an AI provider
 
-Open the plug icon and choose **OpenAI**, **Groq**, or **Google AI Studio (Gemini)**. Enter your API key and a model that supports JSON output. The assistant can explain the active graph, show a valid example path, or propose a graph edit for you to review and apply. Custom graphs are saved in the browser.
+Open the plug icon and choose **OpenAI**, **Groq**, or **Google AI Studio (Gemini)**. Enter your API key and a model that supports JSON output. For Gemini, choose a model with structured JSON output support. Choose **Verify and connect** to run a short verification request.
 
-Select the provider, enter a model ID that supports JSON output and paste your key. Choose **Connect** to run a short verification request. Provider-backed chat can send your message, recent history, node context and retrieved evidence. Graph Assistant can also send the active graph snapshot and the relevant demo data. The key is held in tab memory and sent through the local backend to the selected provider. [Get a Gemini API key](https://aistudio.google.com/api-keys)
+Provider-backed chat can send your message, recent history, node context and retrieved evidence. Graph Assistant can also send the active graph snapshot and relevant demo data. The key is held in tab memory and sent through the local backend to the selected provider. [Get a Gemini API key](https://aistudio.google.com/api-keys)
+
+If the provider cannot rephrase a retrieved school record, Node Chat shows the original answer and source.
 
 ## Checks
 

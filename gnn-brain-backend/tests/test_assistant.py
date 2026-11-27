@@ -4,7 +4,9 @@ from unittest.mock import patch
 
 from fastapi import HTTPException
 
-from app.api.assistant import AssistantRequest, Connection, ask_assistant, provider_request, verify_connection
+from app.api.assistant import (AssistantRequest, Connection, ConversationPlan, ask_assistant,
+                               gemini_body, gemini_content, provider_request, verify_connection)
+from app.api.chat import ChatRequest, chat_endpoint
 from app.graph.workspace import Changes, Workspace, apply_changes, checked_path
 
 BASE = Workspace(title="Example", nodes=[{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
@@ -12,6 +14,77 @@ BASE = Workspace(title="Example", nodes=[{"id": "a", "label": "A"}, {"id": "b", 
 
 
 class GraphAssistantTests(unittest.TestCase):
+    @patch("app.api.assistant.provider_request")
+    def test_ambiguous_student_edit_accepts_null_lookup_fields_and_stops_at_clarification(self, call):
+        call.return_value = {"action": "clarify", "answer": "Which class?", "query": None, "topic": None}
+        request = AssistantRequest(provider="gemini", model="gemini-test", selected="S-A-1",
+                                   query="Create a new student node named Avery Example in a class.")
+        self.assertEqual(ask_assistant(request, "test-key"), {"answer": "Which class?", "path": [], "proposal": None})
+        call.assert_called_once()
+        self.assertIs(call.call_args.kwargs["schema"], ConversationPlan)
+
+    def test_gemini_plan_schema_and_truncation(self):
+        generation = gemini_body([], 1800, ConversationPlan)["generationConfig"]
+        self.assertFalse(generation["responseJsonSchema"]["additionalProperties"])
+        self.assertEqual(generation["responseJsonSchema"]["required"], ["action"])
+        with self.assertRaisesRegex(HTTPException, "before completing"):
+            gemini_content({"candidates": [{"finishReason": "MAX_TOKENS"}]})
+
+    @patch("app.api.assistant.provider_request")
+    def test_invalid_graph_link_is_rejected_after_valid_plan_and_reply(self, call):
+        call.side_effect = [{"action": "graph", "answer": None, "query": None, "topic": None}, {
+            "answer": "Prepared a proposal.",
+            "proposal": {"mode": "edit", "addLinks": [{"source": "a", "target": "unknown"}]},
+        }]
+        request = AssistantRequest(provider="gemini", model="gemini-test", graph=BASE, query="Connect a to unknown")
+        with self.assertRaisesRegex(HTTPException, "graph integrity validation"):
+            ask_assistant(request, "test-key")
+        self.assertEqual(len(BASE.links), 1)
+
+    @patch("app.api.assistant.provider_request")
+    def test_invalid_graph_response_is_distinct_from_an_invalid_proposal(self, call):
+        call.side_effect = [{"action": "graph"}, {"answer": None}]
+        request = AssistantRequest(provider="gemini", model="gemini-test", graph=BASE, query="Explain the graph")
+        with self.assertRaises(HTTPException) as failure:
+            ask_assistant(request, "test-key")
+        self.assertEqual(failure.exception.status_code, 502)
+        self.assertEqual(failure.exception.detail, "The provider returned an invalid graph response.")
+
+    @patch("app.api.assistant.provider_request")
+    def test_gemini_lookup_with_null_plan_answer_keeps_source_and_return_path(self, call):
+        call.side_effect = [
+            {"action": "lookup", "answer": None, "query": "When is Founders Day?", "topic": "founders-day"},
+            {"answer": "Founders Day is on 11 December 2026."},
+        ]
+        result = chat_endpoint(ChatRequest(node="S-A-1", query="When is Founders Day?",
+                                           provider=Connection(provider="gemini", model="gemini-test")), "test-key")
+        self.assertEqual(result["answer"], "Founders Day is on 11 December 2026.")
+        self.assertEqual(result["record"]["node"], "dean")
+        self.assertEqual(result["returnPath"], [step["node"] for step in reversed(result["route"])])
+        self.assertEqual(call.call_count, 2)
+
+    @patch("app.api.assistant.provider_request")
+    def test_invalid_evidence_rephrase_keeps_the_original_record_answer(self, call):
+        question = "When is Founders Day?"
+        expected = chat_endpoint(ChatRequest(node="S-A-1", query=question))
+        request = ChatRequest(node="S-A-1", query=question, provider=Connection(provider="gemini", model="gemini-test"))
+        for reply in ({"answer": "  "}, {"answer": "Unvalidated", "path": []}):
+            with self.subTest(reply=reply):
+                call.side_effect = [{"action": "lookup", "topic": "founders-day"}, reply]
+                result = chat_endpoint(request, "test-key")
+                for field in ("answer", "record", "returnPath"):
+                    self.assertEqual(result[field], expected[field])
+
+    @patch("app.api.assistant.provider_request")
+    def test_reply_and_clarify_still_require_answer_text(self, call):
+        request = AssistantRequest(provider="gemini", model="gemini-test", query="Hello")
+        for action in ("reply", "clarify"):
+            with self.subTest(action=action):
+                call.return_value = {"action": action, "answer": None}
+                with self.assertRaises(HTTPException) as error:
+                    ask_assistant(request, "test-key")
+                self.assertEqual(error.exception.detail, "The provider did not return an answer.")
+
     @patch("app.api.assistant.provider_request")
     def test_social_turn_uses_provider_without_traversal(self, call):
         call.return_value = {"action": "reply", "answer": "Doing well, thanks!"}
@@ -53,7 +126,7 @@ class GraphAssistantTests(unittest.TestCase):
 
     @patch("app.api.assistant.provider_request")
     def test_assistant_receives_whole_school_and_returns_validated_proposal(self, call):
-        call.side_effect = [{"action": "graph"}, {"answer": "Here is a new example.", "path": ["director", "dean"], "proposal": {
+        call.side_effect = [{"action": "graph", "answer": None}, {"answer": "Here is a new example.", "path": ["director", "dean"], "proposal": {
             "mode": "new", "title": "Test graph",
             "upsertNodes": [{"id": "input", "label": "Input"}, {"id": "output", "label": "Output"}],
             "addLinks": [{"source": "input", "target": "output"}],
@@ -117,7 +190,7 @@ class GraphAssistantTests(unittest.TestCase):
         response = connection.getresponse.return_value
         response.status = 200
         response.read.return_value = json.dumps({"candidates": [{
-            "content": {"parts": [{"text": "internal", "thought": True}, {"text": '{"answer":'}, {"text": '"Hello"}'}]},
+            "content": {"parts": [{"text": "internal", "thought": True}, {"text": '{"action":"reply","answer":'}, {"text": '"Hello"}'}]},
         }]}).encode()
         result = provider_request(Connection(provider="gemini", model="gemini-3.5-flash-lite"), "test-key", [
             {"role": "system", "content": "Return JSON."},
@@ -125,8 +198,8 @@ class GraphAssistantTests(unittest.TestCase):
             {"role": "user", "content": "Earlier question"},
             {"role": "assistant", "content": "Earlier answer"},
             {"role": "user", "content": "New question"},
-        ], 512)
-        self.assertEqual(result, {"answer": "Hello"})
+        ], 512, schema=ConversationPlan)
+        self.assertEqual(result, {"action": "reply", "answer": "Hello"})
         connect.assert_called_once_with("generativelanguage.googleapis.com", timeout=40)
         method, path, payload, headers = connection.request.call_args.args
         self.assertEqual((method, path), ("POST", "/v1beta/models/gemini-3.5-flash-lite:generateContent"))
@@ -137,6 +210,7 @@ class GraphAssistantTests(unittest.TestCase):
         self.assertEqual([item["role"] for item in body["contents"]], ["user", "model", "user"])
         self.assertEqual(len(body["contents"][0]["parts"]), 2)
         self.assertEqual(body["generationConfig"]["responseMimeType"], "application/json")
+        self.assertEqual(body["generationConfig"]["responseJsonSchema"], ConversationPlan.model_json_schema())
         connection.close.assert_called_once()
 
     @patch("app.api.assistant.HTTPSConnection")
